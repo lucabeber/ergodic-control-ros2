@@ -16,7 +16,7 @@ class SecondOrderAgent:
         nbDataPoints,
         max_dx=1,
         max_ddx=0.2,
-        dt=1,
+        dt=1.0,
     ):
         self.x = np.array(x)  # position
         # determine which dimesnion we are in from given position

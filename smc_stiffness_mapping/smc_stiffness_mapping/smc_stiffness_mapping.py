@@ -28,20 +28,20 @@ class ErgodicExploration(Node):
         self.current_x = 0.0
         self.current_y = 0.0
 
-        self.timer_period = 0.1  # seconds
+        self.timer_period = 0.01  # seconds
         self.timer = self.create_timer(self.timer_period, self.ergodic_exploration_callback)
 
         # Parameters
         # ===============================
         self.param = lambda: None # Lazy way to define an empty class in python
-        self.param.nbDataPoints = 1000
+        self.param.nbDataPoints = 2000
         self.param.min_kernel_val = 1e-8  # upper bound on the minimum value of the kernel
         self.param.diffusion = 1  # increases global behavior
-        self.param.source_strength = 0.01 # increases local behavior
+        self.param.source_strength = 1 # increases local behavior
         self.param.obstacle_strength = 0  # increases local behavior
         self.param.agent_radius = 5  # changes the effect of the agent on the coverage
-        self.param.max_dx = 1 # maximum velocity of the agent
-        self.param.max_ddx = 0.1 # maximum acceleration of the agent
+        self.param.max_dx = 0.2 # maximum velocity of the agent
+        self.param.max_ddx = 0.01 # maximum acceleration of the agent
         self.param.cooling_radius = (
             1  # changes the effect of the agent on local cooling (collision avoidance)
         )
@@ -56,6 +56,7 @@ class ErgodicExploration(Node):
         self.param.nbResX = 100 # number of grid cells in x direction
         self.param.nbResY = 100  # number of grid cells in y direction
 
+        self.param.dt = 1.0  # time step
         self.param.nbFct = 10  # Number of basis functions along x and y
         # Domain limit for each dimension (considered to be 1
         # for each dimension in this implementation)
@@ -68,9 +69,6 @@ class ErgodicExploration(Node):
         self.param.alpha = np.array([1, 1]) * self.param.diffusion
 
         self.G = np.zeros((self.param.nbResX, self.param.nbResY))
-
-        self.dim_x_s = self.param.nbResX * self.param.dx
-        self.dim_y_s = self.param.nbResX * self.param.dx * 22.0 / 50.0
 
         self.dim_x = self.param.nbResX * self.param.dx
         self.dim_y = self.param.nbResY * self.param.dx
@@ -118,6 +116,14 @@ class ErgodicExploration(Node):
         self.fig, self.ax = plt.subplots(1, 3, figsize=(16, 8))
 
         self.t = 0
+
+        # Conctruct grid data
+        self.grids_x, self.grids_y = np.meshgrid(
+            np.linspace(0, self.dim_x, 100),
+            np.linspace(0, self.dim_y, 100)
+        )
+
+        self.grids = np.array([self.grids_x.ravel(), self.grids_y.ravel()]).T
     
     def stiffness_callback(self, msg):
         # self.get_logger().info('Received stiffness: %s' % msg)
@@ -232,9 +238,10 @@ class ErgodicExploration(Node):
         if self.t % 10 == 0:
             # Extract the trajectory
             self.sample_points = torch.cat([self.sample_points, torch.tensor(self.agents[0].x, dtype=torch.float32).reshape(1, -1)], dim=0)
-
+            # print sample points
+            
             self.stiffness_points = torch.cat((self.stiffness_points, torch.tensor([self.current_stiff], dtype=torch.float32)))
-
+            
             # Construct training data
             self.train_x = self.sample_points.clone()
             self.train_y = self.stiffness_points.clone()
@@ -255,19 +262,12 @@ class ErgodicExploration(Node):
             test_x1 = torch.linspace(0.0, L_list[0], 100)
             test_x2 = torch.linspace(0.0, L_list[1], 100)
             test_x1, test_x2 = torch.meshgrid(test_x1,test_x2)
-            test_x = torch.cat([test_x2.reshape(-1, 1), test_x1.reshape(-1, 1)], dim=1)
+            self.test_x = torch.cat([test_x2.reshape(-1, 1), test_x1.reshape(-1, 1)], dim=1)
 
             with torch.no_grad(), gpytorch.settings.fast_pred_var():
-                self.observed_pred = self.likelihood(self.model(test_x))
+                self.observed_pred = self.likelihood(self.model(self.test_x))
 
-            # Compute the derivatives
-            test_x.requires_grad_(True)
-
-            # Make predictions
-            test_x1 = torch.linspace(0.0, L_list[0], 100)
-            test_x2 = torch.linspace(0.0, L_list[1], 100)
-            test_x1, test_x2 = torch.meshgrid(test_x1,test_x2)
-            self.test_x = torch.cat([test_x2.reshape(-1, 1), test_x1.reshape(-1, 1)], dim=1)
+            self.test_x.requires_grad_(True)
 
             pred = self.model(self.test_x)
             mean = pred.mean
@@ -294,7 +294,7 @@ class ErgodicExploration(Node):
 
             tmp = (gradient_magnitude.detach().numpy())  - 1.5 * np.mean(gradient_magnitude.detach().numpy()) 
             gradient_times_variance = np.maximum(tmp * 3 , np.zeros(100*100)) + varo * 2
-            gradient_times_variance /= ( sum(gradient_times_variance) * self.dx * self.dy) 
+            gradient_times_variance /= ( sum(gradient_times_variance) * self.param.dx * self.param.dy) 
 
 
             # Update the target distribution
@@ -303,6 +303,7 @@ class ErgodicExploration(Node):
             self.G = np.abs(self.G)  # there is no negative heat
             self.goal_density = normalize_mat(self.G)
             
+
             self.ax[0].cla()
             self.ax[0].contourf(self.grids_x, self.grids_y, self.goal_density, cmap="gray_r")
             # Print trajectory
@@ -336,8 +337,26 @@ class ErgodicExploration(Node):
 
             plt.pause(0.001)
         self.t += 1
+
+        # Print the current time step
+        # get current ros time
+        now = self.get_clock().now()
+        # get the time difference
+        delta = now - self.prev_time
+        # print the time difference
+        self.get_logger().info('Time step: %f' % (delta.nanoseconds/1e9))
+        # update the previous time
+        self.prev_time = now
+
+        if self.t == self.param.nbDataPoints:
+            self.get_logger().info('Exploration finished')
+            self.timer.cancel()
+            plt.close()
+            self.print_plots()
+
         
     def init_guassian_process(self):
+        self.prev_time = self.get_clock().now()
         x0 = np.array([self.current_x, self.current_y])
         train_x1 = torch.tensor(x0[0], dtype=torch.float32)
         train_x2 = torch.tensor(x0[1], dtype=torch.float32)
@@ -366,9 +385,8 @@ class ErgodicExploration(Node):
 
         self.model.initialize(**hypers)
 
-        x0 
         self.agents = []
-        agent = SecondOrderAgent(x=x0, nbDataPoints=self.param.nbDataPoints,max_dx=self.param.max_dx,max_ddx=self.param.max_ddx, dt=self.param.dt)
+        agent = SecondOrderAgent(x=x0, nbDataPoints=self.param.nbDataPoints,max_dx=self.param.max_dx,max_ddx=self.param.max_ddx)
         # agent = FirstOrderAgent(x=x, dim_t=cfg.timesteps)
         rgb = np.random.uniform(0, 1, 3)
         agent.color = np.concatenate((rgb, [1.0]))  # append alpha value
@@ -379,6 +397,84 @@ class ErgodicExploration(Node):
         self.stiffness_points = torch.tensor([self.current_stiff], dtype=torch.float32)
 
         self.get_logger().info('Initialization finished')
+
+    def print_plots(self):
+        # Plot
+        # ===============================
+        fig, self.ax = plt.subplots(1, 3, figsize=(16, 8))
+
+        self.ax[0].set_title("Agent trajectory and desired GMM")
+        # Required for plotting discretized GMM
+        xlim_min = 0
+        xlim_max = self.param.nbResX * self.param.dx
+        xm1d = np.linspace(xlim_min, xlim_max, self.param.nbResX)  # Spatial range
+        xm = np.zeros((2, self.param.nbResX, self.param.nbResY))
+        xm[0, :, :], xm[1, :, :] = np.meshgrid(xm1d, xm1d)
+        X = np.squeeze(xm[0, :, :])
+        Y = np.squeeze(xm[1, :, :])
+
+        self.ax[0].contourf(X, Y, self.G, cmap="gray_r") # plot discrete GMM
+        # Plot agent trajectories
+        for agent in self.agents:
+            self.ax[0].plot(
+            agent.x_arr[0, 0], agent.x_arr[0, 1], marker=".", color="black", markersize=10
+            )
+            self.ax[0].plot(
+            agent.x_arr[:, 0],
+            agent.x_arr[:, 1],
+            color="black",
+            linewidth=1,
+            )
+        self.ax[0].set_aspect("equal", "box")
+
+        self.ax[1].set_title("Exploration goal (heat source), explored regions at time t")
+        arr = self.goal_density - self.coverage_arr[..., -1]
+        arr_pos = np.where(arr > 0, arr, 0) 
+        arr_neg = np.where(arr < 0, -arr, 0)
+        self.ax[1].contourf(X, Y, arr_pos, cmap='gray_r')
+        # Plot agent trajectories
+        for agent in self.agents:
+            self.ax[1].plot(agent.x_arr[:, 0], agent.x_arr[:, 1], linewidth=10, color="blue", label="agent footprint") # sensor footprint
+            self.ax[1].plot(agent.x_arr[:, 0], agent.x_arr[:, 1], linestyle="--", color="black", label='agent path') # trajectory line
+        self.ax[1].legend(loc="upper left")
+        self.ax[1].set_aspect("equal", "box")
+
+        self.ax[2].set_title("Gradient of the potential field")
+        gradient_y, gradient_x = np.gradient(self.heat_arr[..., -1])
+        self.ax[2].quiver(X, Y, gradient_x, gradient_y, scale=15, units='xy') # Scales the length of the arrow inversely
+        # self.ax[2].quiver(X, Y, gradient_x, gradient_y)
+
+        # Plot agent trajectories
+        for agent in self.agents:
+            self.ax[2].plot(agent.x_arr[:, 0], agent.x_arr[:, 1], linestyle="--", color="black") # trajectory line
+            self.ax[2].plot(
+            agent.x_arr[0, 0], agent.x_arr[0, 1], marker=".", color="black", markersize=10
+            )
+        self.ax[2].set_aspect("equal", "box")
+
+        plt.show()
+
+        # Plot how the gradient field change over time using heat_arr and coverage_arr
+        # ===============================
+        fig, self.ax = plt.subplots(1, 2, figsize=(16, 8))
+
+        self.ax[0].set_title("Gradient of the potential field over time")
+        self.ax[1].set_title("Exploration goal (heat source), explored regions over time")
+        self.ax[0].set_aspect('equal', adjustable='box')
+        self.ax[1].set_aspect('equal', adjustable='box')
+        for t in range(self.param.nbDataPoints):
+            gradient_y, gradient_x = np.gradient(self.heat_arr[..., t])
+            self.ax[0].quiver(X, Y, gradient_x, gradient_y)
+            arr = self.goal_density_arr[..., t] - self.coverage_arr[..., t]
+            arr_pos = np.where(arr > 0, arr, 0)
+            arr_neg = np.where(arr < 0, -arr, 0)
+            self.ax[1].contourf(X, Y, arr_pos, cmap='gray_r')
+            for agent in self.agents:
+                self.ax[1].plot(agent.x_arr[:t, 0], agent.x_arr[:t, 1], linestyle="--", color="black")
+                self.ax[1].plot(agent.x_arr[t, 0], agent.x_arr[t, 1], marker=".", color="black", markersize=10)
+            plt.pause(0.01)
+            self.ax[0].clear()
+            self.ax[1].clear()
 
 
 
