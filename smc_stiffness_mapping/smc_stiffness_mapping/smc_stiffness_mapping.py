@@ -127,8 +127,8 @@ class ErgodicExploration(Node):
     
     def stiffness_callback(self, msg):
         # self.get_logger().info('Received stiffness: %s' % msg)
-        self.current_x = msg.x
-        self.current_y = msg.y
+        self.current_x = msg.x * 1000
+        self.current_y = msg.y * 1000
         self.current_stiff = msg.z
 
         if self.first_stiff == False:
@@ -357,6 +357,7 @@ class ErgodicExploration(Node):
         
     def init_guassian_process(self):
         self.prev_time = self.get_clock().now()
+
         x0 = np.array([self.current_x, self.current_y])
         train_x1 = torch.tensor(x0[0], dtype=torch.float32)
         train_x2 = torch.tensor(x0[1], dtype=torch.float32)

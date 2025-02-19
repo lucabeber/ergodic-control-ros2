@@ -1,6 +1,10 @@
 import numpy as np
 import matplotlib.pyplot as plt
 
+# Append the path of torch and gpytorch to the system path
+import sys
+sys.path.append('/home/lucabeber/.local/lib/python3.10/site-packages')
+
 import torch
 import gpytorch
 

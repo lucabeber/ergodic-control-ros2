@@ -8,6 +8,11 @@ from geometry_msgs.msg import Vector3
 import numpy as np
 import matplotlib.pyplot as plt
 
+# Append the path of torch and gpytorch to the system path
+import sys
+sys.path.append('/usr/lib/python3/dist-packages')
+sys.path.append('/home/lucabeber/.local/lib/python3.10/site-packages')
+
 import torch
 import gpytorch
 
@@ -77,7 +82,7 @@ class StiffnessMappingNode(Node):
             np.linspace(0, L_list[1], 12)
         )
 
-        data = np.genfromtxt('/home/luca/ROS2/contoller_ws/src/ergodic-control-ros2/smc_stiffness_mapping/ric.csv', delimiter=',', skip_header=0)
+        data = np.genfromtxt('/home/lucabeber/experiment_setup/controller_ws/src/ergodic-control-ros2/smc_stiffness_mapping/ric.csv', delimiter=',', skip_header=0)
 
         # Save data in np arrays
         # first column
