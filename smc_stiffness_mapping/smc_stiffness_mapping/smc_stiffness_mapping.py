@@ -5,8 +5,15 @@ from rclpy.node import Node
 from geometry_msgs.msg import Point
 from geometry_msgs.msg import Vector3
 import sys, os 
+
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'smc_stiffness_mapping'))
 from smc_lib import *
+
+import matplotlib.pyplot as plt
+import matplotlib.animation as animation
+
+import torch
+import time
 
 class ErgodicExploration(Node):
 
@@ -34,14 +41,14 @@ class ErgodicExploration(Node):
         # Parameters
         # ===============================
         self.param = lambda: None # Lazy way to define an empty class in python
-        self.param.nbDataPoints = 2000
+        self.param.nbDataPoints = 6000
         self.param.min_kernel_val = 1e-8  # upper bound on the minimum value of the kernel
         self.param.diffusion = 1  # increases global behavior
         self.param.source_strength = 1 # increases local behavior
         self.param.obstacle_strength = 0  # increases local behavior
         self.param.agent_radius = 5  # changes the effect of the agent on the coverage
-        self.param.max_dx = 0.2 # maximum velocity of the agent
-        self.param.max_ddx = 0.01 # maximum acceleration of the agent
+        self.param.max_dx = 0.1 # maximum velocity of the agent
+        self.param.max_ddx = 0.001 # maximum acceleration of the agent
         self.param.cooling_radius = (
             1  # changes the effect of the agent on local cooling (collision avoidance)
         )
@@ -114,6 +121,11 @@ class ErgodicExploration(Node):
         # ===============================
         # do absolute minimum inside the loop for speed
         self.fig, self.ax = plt.subplots(1, 3, figsize=(16, 8))
+        self.frames = []
+        # Set up the video writer
+        self.fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        self.out = cv2.VideoWriter('animated_plot_video.mp4', self.fourcc, 10, (2048, 1080))  # Change size to 2k resolution
+
 
         self.t = 0
 
@@ -124,11 +136,12 @@ class ErgodicExploration(Node):
         )
 
         self.grids = np.array([self.grids_x.ravel(), self.grids_y.ravel()]).T
+
     
     def stiffness_callback(self, msg):
         # self.get_logger().info('Received stiffness: %s' % msg)
-        self.current_x = msg.x * 1000
-        self.current_y = msg.y * 1000
+        self.current_x = msg.x * 1000.0
+        self.current_y = msg.y * 1000.0
         self.current_stiff = msg.z
 
         if self.first_stiff == False:
@@ -235,73 +248,83 @@ class ErgodicExploration(Node):
             self.publisher_position.publish(msg)
 
         # update the pdf every 10 steps
-        if self.t % 10 == 0:
+        if self.t % 50 == 0:
+            start_time = self.get_clock().now()
             # Extract the trajectory
-            self.sample_points = torch.cat([self.sample_points, torch.tensor(self.agents[0].x, dtype=torch.float32).reshape(1, -1)], dim=0)
-            # print sample points
-            
+            self.sample_points = torch.cat([self.sample_points, torch.tensor([self.current_x, self.current_y], dtype=torch.float32).reshape(1, -1)], dim=0)
             self.stiffness_points = torch.cat((self.stiffness_points, torch.tensor([self.current_stiff], dtype=torch.float32)))
-            
+            # self.get_logger().info('Extract trajectory: %f' % (self.get_clock().now() - start_time).nanoseconds)
+
+            # start_time = self.get_clock().now()
             # Construct training data
             self.train_x = self.sample_points.clone()
             self.train_y = self.stiffness_points.clone()
+            # self.get_logger().info('Construct training data: %f' % (self.get_clock().now() - start_time).nanoseconds)
 
+            # start_time = self.get_clock().now()
             # Training the model
             self.model.train()
             self.likelihood.train()
-
             self.model.set_train_data(self.train_x, self.train_y, strict=False)
+            # self.get_logger().info('Train model: %f' % (self.get_clock().now() - start_time).nanoseconds)
 
+            # start_time = self.get_clock().now()
             # Switch to evaluation mode
             self.model.eval()
             self.likelihood.eval()
+            # self.get_logger().info('Switch to evaluation mode: %f' % (self.get_clock().now() - start_time).nanoseconds)
 
-            L_list = np.array([self.dim_x,self.dim_y])
-
-            # Make predictions
+            # start_time = self.get_clock().now()
+            L_list = np.array([self.dim_x, self.dim_y])
             test_x1 = torch.linspace(0.0, L_list[0], 100)
             test_x2 = torch.linspace(0.0, L_list[1], 100)
-            test_x1, test_x2 = torch.meshgrid(test_x1,test_x2)
+            test_x1, test_x2 = torch.meshgrid(test_x1, test_x2)
             self.test_x = torch.cat([test_x2.reshape(-1, 1), test_x1.reshape(-1, 1)], dim=1)
+            # self.get_logger().info('Prepare test data: %f' % (self.get_clock().now() - start_time).nanoseconds)
 
+            # start_time = self.get_clock().now()
             with torch.no_grad(), gpytorch.settings.fast_pred_var():
                 self.observed_pred = self.likelihood(self.model(self.test_x))
+            # self.get_logger().info('Make predictions: %f' % (self.get_clock().now() - start_time).nanoseconds)
 
+            # start_time = self.get_clock().now()
             self.test_x.requires_grad_(True)
-
             pred = self.model(self.test_x)
             mean = pred.mean
             mean.backward(torch.ones(mean.shape))
             var = pred.variance
+            # self.get_logger().info('Compute gradients: %f' % (self.get_clock().now() - start_time).nanoseconds)
 
-            # Compute the magnitude of the gradient
+            # start_time = self.get_clock().now()
             gradient_magnitude = torch.sqrt(self.test_x.grad[:, 0]**2 + self.test_x.grad[:, 1]**2)
-
-            # Multiply the point gradient magnitude times the variance of that point
-            magnitude = gradient_magnitude.detach().numpy()/ sum(gradient_magnitude.detach().numpy())
+            magnitude = gradient_magnitude.detach().numpy() / sum(gradient_magnitude.detach().numpy())
             mean = self.observed_pred.mean.cpu().numpy() / sum(self.observed_pred.mean.cpu().numpy())
             varo = var.detach().numpy()
-            
-        
-            border_threshold = 0.05  # Adjust this threshold as needed
+            # self.get_logger().info('Compute magnitude: %f' % (self.get_clock().now() - start_time).nanoseconds)
+
+            # start_time = self.get_clock().now()
+            border_threshold = 0.05
             border_mask_x = np.minimum(self.test_x[:, 0].cpu().detach().numpy() / (border_threshold * self.dim_x),
-                (1 - self.test_x[:, 0].cpu().detach().numpy() / self.dim_x) / border_threshold)
+                                       (1 - self.test_x[:, 0].cpu().detach().numpy() / self.dim_x) / border_threshold)
             border_mask_y = np.minimum(self.test_x[:, 1].cpu().detach().numpy() / (border_threshold * self.dim_y),
-                (1 - self.test_x[:, 1].cpu().detach().numpy() / self.dim_y) / border_threshold)
+                                       (1 - self.test_x[:, 1].cpu().detach().numpy() / self.dim_y) / border_threshold)
             border_mask = np.minimum(border_mask_x, border_mask_y)
             border_mask = np.clip(border_mask, 0, 1)
             varo *= border_mask
+            # self.get_logger().info('Apply border mask: %f' % (self.get_clock().now() - start_time).nanoseconds)
 
-            tmp = (gradient_magnitude.detach().numpy())  - 1.5 * np.mean(gradient_magnitude.detach().numpy()) 
-            gradient_times_variance = np.maximum(tmp * 3 , np.zeros(100*100)) + varo * 2
-            gradient_times_variance /= ( sum(gradient_times_variance) * self.param.dx * self.param.dy) 
+            # start_time = self.get_clock().now()
+            tmp = (gradient_magnitude.detach().numpy()) - 1.5 * np.mean(gradient_magnitude.detach().numpy())
+            gradient_times_variance = np.maximum(tmp * 1.5, np.zeros(100 * 100)) + varo
+            gradient_times_variance /= (sum(gradient_times_variance) * self.param.dx * self.param.dy)
+            # self.get_logger().info('Compute gradient times variance: %f' % (self.get_clock().now() - start_time).nanoseconds)
 
-
-            # Update the target distribution
+            # start_time = self.get_clock().now()
             g = gradient_times_variance
             self.G = np.reshape(g, [self.param.nbResX, self.param.nbResY])
-            self.G = np.abs(self.G)  # there is no negative heat
+            self.G = np.abs(self.G)
             self.goal_density = normalize_mat(self.G)
+            # self.get_logger().info('Update target distribution: %f' % (self.get_clock().now() - start_time).nanoseconds)
             
 
             self.ax[0].cla()
@@ -336,6 +359,11 @@ class ErgodicExploration(Node):
             self.ax[2].set_title('EKF Elastic modulus covariance')
 
             plt.pause(0.001)
+            # Convert the figure to an OpenCV-compatible image and store in frames list
+            frame = fig_to_cv2(self.t, self.fig)
+            self.frames.append(frame)
+
+
         self.t += 1
 
         # Print the current time step
@@ -400,82 +428,94 @@ class ErgodicExploration(Node):
         self.get_logger().info('Initialization finished')
 
     def print_plots(self):
-        # Plot
+        # Create a video of the plots
         # ===============================
-        fig, self.ax = plt.subplots(1, 3, figsize=(16, 8))
+        for frame in self.frames:
+            # Resize the frame to match the video size
+            frame_resized = cv2.resize(frame, (2048, 1080))
+            # Write the frame to the video
+            self.out.write(frame_resized)
 
-        self.ax[0].set_title("Agent trajectory and desired GMM")
-        # Required for plotting discretized GMM
-        xlim_min = 0
-        xlim_max = self.param.nbResX * self.param.dx
-        xm1d = np.linspace(xlim_min, xlim_max, self.param.nbResX)  # Spatial range
-        xm = np.zeros((2, self.param.nbResX, self.param.nbResY))
-        xm[0, :, :], xm[1, :, :] = np.meshgrid(xm1d, xm1d)
-        X = np.squeeze(xm[0, :, :])
-        Y = np.squeeze(xm[1, :, :])
+        # Release the video writer and clean up
+        self.out.release()
+        cv2.destroyAllWindows()
 
-        self.ax[0].contourf(X, Y, self.G, cmap="gray_r") # plot discrete GMM
-        # Plot agent trajectories
-        for agent in self.agents:
-            self.ax[0].plot(
-            agent.x_arr[0, 0], agent.x_arr[0, 1], marker=".", color="black", markersize=10
-            )
-            self.ax[0].plot(
-            agent.x_arr[:, 0],
-            agent.x_arr[:, 1],
-            color="black",
-            linewidth=1,
-            )
-        self.ax[0].set_aspect("equal", "box")
+        # # Plot
+        # # ===============================
+        # fig, self.ax = plt.subplots(1, 3, figsize=(16, 8))
 
-        self.ax[1].set_title("Exploration goal (heat source), explored regions at time t")
-        arr = self.goal_density - self.coverage_arr[..., -1]
-        arr_pos = np.where(arr > 0, arr, 0) 
-        arr_neg = np.where(arr < 0, -arr, 0)
-        self.ax[1].contourf(X, Y, arr_pos, cmap='gray_r')
-        # Plot agent trajectories
-        for agent in self.agents:
-            self.ax[1].plot(agent.x_arr[:, 0], agent.x_arr[:, 1], linewidth=10, color="blue", label="agent footprint") # sensor footprint
-            self.ax[1].plot(agent.x_arr[:, 0], agent.x_arr[:, 1], linestyle="--", color="black", label='agent path') # trajectory line
-        self.ax[1].legend(loc="upper left")
-        self.ax[1].set_aspect("equal", "box")
+        # self.ax[0].set_title("Agent trajectory and desired GMM")
+        # # Required for plotting discretized GMM
+        # xlim_min = 0
+        # xlim_max = self.param.nbResX * self.param.dx
+        # xm1d = np.linspace(xlim_min, xlim_max, self.param.nbResX)  # Spatial range
+        # xm = np.zeros((2, self.param.nbResX, self.param.nbResY))
+        # xm[0, :, :], xm[1, :, :] = np.meshgrid(xm1d, xm1d)
+        # X = np.squeeze(xm[0, :, :])
+        # Y = np.squeeze(xm[1, :, :])
 
-        self.ax[2].set_title("Gradient of the potential field")
-        gradient_y, gradient_x = np.gradient(self.heat_arr[..., -1])
-        self.ax[2].quiver(X, Y, gradient_x, gradient_y, scale=15, units='xy') # Scales the length of the arrow inversely
-        # self.ax[2].quiver(X, Y, gradient_x, gradient_y)
+        # self.ax[0].contourf(X, Y, self.G, cmap="gray_r") # plot discrete GMM
+        # # Plot agent trajectories
+        # for agent in self.agents:
+        #     self.ax[0].plot(
+        #     agent.x_arr[0, 0], agent.x_arr[0, 1], marker=".", color="black", markersize=10
+        #     )
+        #     self.ax[0].plot(
+        #     agent.x_arr[:, 0],
+        #     agent.x_arr[:, 1],
+        #     color="black",
+        #     linewidth=1,
+        #     )
+        # self.ax[0].set_aspect("equal", "box")
 
-        # Plot agent trajectories
-        for agent in self.agents:
-            self.ax[2].plot(agent.x_arr[:, 0], agent.x_arr[:, 1], linestyle="--", color="black") # trajectory line
-            self.ax[2].plot(
-            agent.x_arr[0, 0], agent.x_arr[0, 1], marker=".", color="black", markersize=10
-            )
-        self.ax[2].set_aspect("equal", "box")
+        # self.ax[1].set_title("Exploration goal (heat source), explored regions at time t")
+        # arr = self.goal_density - self.coverage_arr[..., -1]
+        # arr_pos = np.where(arr > 0, arr, 0) 
+        # arr_neg = np.where(arr < 0, -arr, 0)
+        # self.ax[1].contourf(X, Y, arr_pos, cmap='gray_r')
+        # # Plot agent trajectories
+        # for agent in self.agents:
+        #     self.ax[1].plot(agent.x_arr[:, 0], agent.x_arr[:, 1], linewidth=10, color="blue", label="agent footprint") # sensor footprint
+        #     self.ax[1].plot(agent.x_arr[:, 0], agent.x_arr[:, 1], linestyle="--", color="black", label='agent path') # trajectory line
+        # self.ax[1].legend(loc="upper left")
+        # self.ax[1].set_aspect("equal", "box")
 
-        plt.show()
+        # self.ax[2].set_title("Gradient of the potential field")
+        # gradient_y, gradient_x = np.gradient(self.heat_arr[..., -1])
+        # self.ax[2].quiver(X, Y, gradient_x, gradient_y, scale=15, units='xy') # Scales the length of the arrow inversely
+        # # self.ax[2].quiver(X, Y, gradient_x, gradient_y)
 
-        # Plot how the gradient field change over time using heat_arr and coverage_arr
-        # ===============================
-        fig, self.ax = plt.subplots(1, 2, figsize=(16, 8))
+        # # Plot agent trajectories
+        # for agent in self.agents:
+        #     self.ax[2].plot(agent.x_arr[:, 0], agent.x_arr[:, 1], linestyle="--", color="black") # trajectory line
+        #     self.ax[2].plot(
+        #     agent.x_arr[0, 0], agent.x_arr[0, 1], marker=".", color="black", markersize=10
+        #     )
+        # self.ax[2].set_aspect("equal", "box")
 
-        self.ax[0].set_title("Gradient of the potential field over time")
-        self.ax[1].set_title("Exploration goal (heat source), explored regions over time")
-        self.ax[0].set_aspect('equal', adjustable='box')
-        self.ax[1].set_aspect('equal', adjustable='box')
-        for t in range(self.param.nbDataPoints):
-            gradient_y, gradient_x = np.gradient(self.heat_arr[..., t])
-            self.ax[0].quiver(X, Y, gradient_x, gradient_y)
-            arr = self.goal_density_arr[..., t] - self.coverage_arr[..., t]
-            arr_pos = np.where(arr > 0, arr, 0)
-            arr_neg = np.where(arr < 0, -arr, 0)
-            self.ax[1].contourf(X, Y, arr_pos, cmap='gray_r')
-            for agent in self.agents:
-                self.ax[1].plot(agent.x_arr[:t, 0], agent.x_arr[:t, 1], linestyle="--", color="black")
-                self.ax[1].plot(agent.x_arr[t, 0], agent.x_arr[t, 1], marker=".", color="black", markersize=10)
-            plt.pause(0.01)
-            self.ax[0].clear()
-            self.ax[1].clear()
+        # plt.show()
+
+        # # Plot how the gradient field change over time using heat_arr and coverage_arr
+        # # ===============================
+        # fig, self.ax = plt.subplots(1, 2, figsize=(16, 8))
+
+        # self.ax[0].set_title("Gradient of the potential field over time")
+        # self.ax[1].set_title("Exploration goal (heat source), explored regions over time")
+        # self.ax[0].set_aspect('equal', adjustable='box')
+        # self.ax[1].set_aspect('equal', adjustable='box')
+        # for t in range(self.param.nbDataPoints):
+        #     gradient_y, gradient_x = np.gradient(self.heat_arr[..., t])
+        #     self.ax[0].quiver(X, Y, gradient_x, gradient_y)
+        #     arr = self.goal_density_arr[..., t] - self.coverage_arr[..., t]
+        #     arr_pos = np.where(arr > 0, arr, 0)
+        #     arr_neg = np.where(arr < 0, -arr, 0)
+        #     self.ax[1].contourf(X, Y, arr_pos, cmap='gray_r')
+        #     for agent in self.agents:
+        #         self.ax[1].plot(agent.x_arr[:t, 0], agent.x_arr[:t, 1], linestyle="--", color="black")
+        #         self.ax[1].plot(agent.x_arr[t, 0], agent.x_arr[t, 1], marker=".", color="black", markersize=10)
+        #     plt.pause(0.01)
+        #     self.ax[0].clear()
+        #     self.ax[1].clear()
 
 
 

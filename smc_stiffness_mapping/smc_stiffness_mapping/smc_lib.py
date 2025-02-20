@@ -1,11 +1,8 @@
 import numpy as np
-import matplotlib.pyplot as plt
 
 # Append the path of torch and gpytorch to the system path
 import sys
 sys.path.append('/home/lucabeber/.local/lib/python3.10/site-packages')
-
-import torch
 import gpytorch
 
 # Helper class
@@ -399,3 +396,27 @@ class GPModel(gpytorch.models.ExactGP):
         mean_x = self.mean_module(x)
         covar_x = self.covar_module(x)
         return gpytorch.distributions.MultivariateNormal(mean_x, covar_x)
+        
+
+import numpy as np
+import cv2
+import matplotlib.pyplot as plt
+from io import BytesIO
+from PIL import Image
+
+# Function to convert a Matplotlib figure to an OpenCV-compatible format (numpy array)
+def fig_to_cv2(n,fig):
+    # Save the figure to a BytesIO object
+    buf = BytesIO()
+    # fig.savefig(f"{n}_debug.pdf", format='pdf', dpi=300)
+    fig.savefig(buf, format='png')
+    buf.seek(0)
+    # save fig to file for debugging
+
+    # Use PIL to open the PNG image and convert to a numpy array
+    pil_img = Image.open(buf)
+    open_cv_image = np.array(pil_img)
+    
+    # Convert RGB to BGR (OpenCV uses BGR, while Matplotlib uses RGB)
+    open_cv_image = cv2.cvtColor(open_cv_image, cv2.COLOR_RGB2BGR)
+    return open_cv_image

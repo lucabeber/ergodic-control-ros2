@@ -146,8 +146,8 @@ class StiffnessMappingNode(Node):
 
 
     def position_callback(self, msg):
-        self.position_x = msg.x
-        self.position_y = msg.y
+        self.position_x = msg.x*1000.0
+        self.position_y = msg.y*1000.0
 
     def test_ergodic_callback(self):
         # Make prediction
@@ -159,8 +159,8 @@ class StiffnessMappingNode(Node):
         # Publish stiffness
         tmp = stiffness_sample.numpy()[0]+1e-8
         msg = Vector3()
-        msg.x = self.position_x
-        msg.y = self.position_y
+        msg.x = self.position_x/1000.0
+        msg.y = self.position_y/1000.0
         msg.z = tmp
         self.stiffness_publisher.publish(msg)
         
