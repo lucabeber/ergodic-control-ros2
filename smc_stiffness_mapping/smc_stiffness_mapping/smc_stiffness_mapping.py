@@ -14,6 +14,7 @@ import matplotlib.animation as animation
 
 import torch
 import time
+from sklearn.cluster import DBSCAN
 
 class ErgodicExploration(Node):
 
@@ -41,7 +42,7 @@ class ErgodicExploration(Node):
         # Parameters
         # ===============================
         self.param = lambda: None # Lazy way to define an empty class in python
-        self.param.nbDataPoints = 6000
+        self.param.nbDataPoints = 1000
         self.param.min_kernel_val = 1e-8  # upper bound on the minimum value of the kernel
         self.param.diffusion = 1  # increases global behavior
         self.param.source_strength = 1 # increases local behavior
@@ -298,7 +299,7 @@ class ErgodicExploration(Node):
             # start_time = self.get_clock().now()
             gradient_magnitude = torch.sqrt(self.test_x.grad[:, 0]**2 + self.test_x.grad[:, 1]**2)
             magnitude = gradient_magnitude.detach().numpy() / sum(gradient_magnitude.detach().numpy())
-            mean = self.observed_pred.mean.cpu().numpy() / sum(self.observed_pred.mean.cpu().numpy())
+            mean_el = self.observed_pred.mean.cpu().numpy() / sum(self.observed_pred.mean.cpu().numpy())
             varo = var.detach().numpy()
             # self.get_logger().info('Compute magnitude: %f' % (self.get_clock().now() - start_time).nanoseconds)
 
@@ -314,10 +315,16 @@ class ErgodicExploration(Node):
             # self.get_logger().info('Apply border mask: %f' % (self.get_clock().now() - start_time).nanoseconds)
 
             # start_time = self.get_clock().now()
-            tmp = (gradient_magnitude.detach().numpy()) - 1.5 * np.mean(gradient_magnitude.detach().numpy())
-            gradient_times_variance = np.maximum(tmp * 1.5, np.zeros(100 * 100)) + varo
-            gradient_times_variance /= (sum(gradient_times_variance) * self.param.dx * self.param.dy)
+            # tmp = (gradient_magnitude.detach().numpy()) - 1.5 * np.mean(gradient_magnitude.detach().numpy())
+            # gradient_times_variance = np.maximum(tmp * 1.5, np.zeros(100 * 100)) + varo
+            # gradient_times_variance /= (sum(gradient_times_variance) * self.param.dx * self.param.dy)
             # self.get_logger().info('Compute gradient times variance: %f' % (self.get_clock().now() - start_time).nanoseconds)
+            tmp = (gradient_magnitude.detach().numpy())
+
+            # Normalize the gradient with the stiffness
+            tmp = (tmp + 1e-8) / (mean_el + 1e-8)
+            gradient_times_variance = np.maximum(tmp, np.zeros(100*100)) + varo *10000 
+            gradient_times_variance /= ( sum(gradient_times_variance) * self.param.dx * self.param.dy) 
 
             # start_time = self.get_clock().now()
             g = gradient_times_variance
@@ -430,15 +437,15 @@ class ErgodicExploration(Node):
     def print_plots(self):
         # Create a video of the plots
         # ===============================
-        for frame in self.frames:
-            # Resize the frame to match the video size
-            frame_resized = cv2.resize(frame, (2048, 1080))
-            # Write the frame to the video
-            self.out.write(frame_resized)
+        # for frame in self.frames:
+        #     # Resize the frame to match the video size
+        #     frame_resized = cv2.resize(frame, (2048, 1080))
+        #     # Write the frame to the video
+        #     self.out.write(frame_resized)
 
-        # Release the video writer and clean up
-        self.out.release()
-        cv2.destroyAllWindows()
+        # # Release the video writer and clean up
+        # self.out.release()
+        # cv2.destroyAllWindows()
 
         # # Plot
         # # ===============================
@@ -517,6 +524,31 @@ class ErgodicExploration(Node):
         #     self.ax[0].clear()
         #     self.ax[1].clear()
 
+        # Clustering stiffer areas
+
+        # Extract stiffness values and coordinates
+        stiffness_values = self.observed_pred.mean.cpu().numpy()
+        coordinates = self.test_x.cpu().detach().numpy()
+
+        # Apply DBSCAN clustering
+        clustering = DBSCAN(eps=0.05, min_samples=5).fit(coordinates, sample_weight=stiffness_values)
+        labels = clustering.labels_
+
+        # Plot clusters
+        unique_labels = set(labels)
+        for k in unique_labels:
+            if k == -1:
+            # Black used for noise.
+                col = [0, 0, 0, 1]
+            else:
+                col = plt.cm.Spectral(float(k) / len(unique_labels))
+
+                class_member_mask = (labels == k)
+
+                xy = coordinates[class_member_mask]
+                self.ax[0].plot(xy[:, 0], xy[:, 1], 'o', markerfacecolor=tuple(col), markeredgecolor='k', markersize=6)
+
+        self.ax[0].set_title('Ergodic trajectory, EID, and clusters')
 
 
 def main(args=None):

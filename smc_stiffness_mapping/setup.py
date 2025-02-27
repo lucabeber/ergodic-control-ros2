@@ -22,6 +22,7 @@ setup(
         'console_scripts': [
             'smc_stiffness_mapping = smc_stiffness_mapping.smc_stiffness_mapping:main',
             'test_ergodic = smc_stiffness_mapping.test_ergodic:main',
+            'reset_ft = smc_stiffness_mapping.reset:main',
         ],
     },
 )
